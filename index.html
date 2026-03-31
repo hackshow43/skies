@@ -10,7 +10,7 @@
   <meta name="apple-mobile-web-app-title" content="Skies" />
   <title>Skies</title>
   <link rel="manifest" href="manifest.json" />
-  <link rel="apple-touch-icon" href="icon-192.png" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
   <style>
     /* ── Reset & tokens ─────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -373,7 +373,10 @@
       transition: height 0.4s ease;
     }
     .pb.rain { background: var(--blue-bg); border: 0.5px solid var(--blue); opacity: 0.85; }
-    .pb.snow { background: var(--bg3); border: 0.5px solid var(--border2); }
+    .pb.snow { background: #ddeeff; border: 0.5px solid #99bbdd; opacity: 0.9; }
+    @media (prefers-color-scheme: dark) {
+      .pb.snow { background: #1a2e40; border: 0.5px solid #2a4a60; }
+    }
     .pb-lbl { font-size: 9px; color: var(--text3); white-space: nowrap; }
     .precip-stats {
       display: flex; gap: 16px;
@@ -491,11 +494,27 @@
     </div>
   </div>
 
+  <!-- Pull-to-refresh indicator -->
+  <div id="ptrIndicator" style="
+    display:flex; align-items:center; justify-content:center;
+    height:0; overflow:hidden; transition:height 0.15s;
+    color:var(--text3); font-size:12px; gap:6px;
+  ">
+    <div id="ptrSpinner" style="
+      width:14px; height:14px; border:1.5px solid var(--border2);
+      border-top-color:var(--blue); border-radius:50%;
+    "></div>
+    <span id="ptrLabel">Pull to refresh</span>
+  </div>
+
   <!-- Error -->
   <div id="errorBanner"></div>
 
-  <!-- Date -->
-  <div class="date-label" id="dateLabel">—</div>
+  <!-- Date + live clock -->
+  <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:20px;margin-top:16px;">
+    <div class="date-label" id="dateLabel" style="margin-bottom:0;">—</div>
+    <div id="localClock" style="font-size:22px;font-weight:300;color:var(--text);letter-spacing:-0.5px;line-height:1;">—</div>
+  </div>
 
   <!-- Hero -->
   <div class="hero">
@@ -522,8 +541,8 @@
   <div class="section-label">Recent precipitation</div>
   <div class="precip-card">
     <div class="precip-tabs">
-      <div class="ptab active" onclick="setPrecip('rain',this)">Rain (mm)</div>
-      <div class="ptab" onclick="setPrecip('snow',this)">Snow (cm)</div>
+      <div class="ptab active" onclick="setPrecip('rain',this)">🌧 Rain · mm</div>
+      <div class="ptab" onclick="setPrecip('snow',this)">❄️ Snow · cm</div>
     </div>
     <div class="precip-chart" id="precipChart"></div>
     <div class="precip-stats" id="precipStats"></div>
@@ -559,7 +578,10 @@
   </div>
 
   <!-- Aurora -->
-  <div class="section-label">Aurora forecast</div>
+  <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;">
+    <div class="section-label" style="margin-bottom:0;">Aurora forecast</div>
+    <span id="geoMeta" style="font-size:10px;color:var(--text3);letter-spacing:0.01em;"></span>
+  </div>
   <div class="aurora-card">
     <div class="aurora-stripe"></div>
     <div class="aurora-head">
@@ -692,7 +714,7 @@ async function fetchWeather(lat, lon) {
   const url = `https://api.open-meteo.com/v1/forecast?` +
     `latitude=${lat}&longitude=${lon}` +
     `&current=temperature_2m,apparent_temperature,weathercode,precipitation` +
-    `&hourly=temperature_2m,weathercode,precipitation_probability,precipitation` +
+    `&hourly=temperature_2m,weathercode,precipitation_probability,precipitation,is_day` +
     `&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,precipitation_probability_max,sunrise,sunset,uv_index_max` +
     `&past_days=7` +
     `&forecast_days=7` +
@@ -780,13 +802,84 @@ function renderAll() {
 }
 
 // ── Header / date ──────────────────────────────────────────────────────────
-function renderHeader() {
-  const now = new Date();
-  const opts = { weekday: 'long', month: 'long', day: 'numeric' };
-  const time = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  document.getElementById('dateLabel').textContent =
-    `${now.toLocaleDateString('en-CA', opts)} · Updated ${time}`;
+function getLocationTz() {
+  return STATE.weather?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
+
+function renderHeader() {
+  const tz = getLocationTz();
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric', timeZone: tz });
+  const updatedStr = now.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit', timeZone: tz });
+  document.getElementById('dateLabel').textContent = `${dateStr} · Updated ${updatedStr}`;
+}
+
+// ── Live clock (location-local time) ───────────────────────────────────────
+function tickClock() {
+  const el = document.getElementById('localClock');
+  if (!el) return;
+  const tz = getLocationTz();
+  el.textContent = new Date().toLocaleTimeString('en-CA', {
+    hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: tz
+  });
+}
+setInterval(tickClock, 1000);
+tickClock();
+
+// ── Pull-to-refresh ────────────────────────────────────────────────────────
+(function() {
+  let startY = 0, pulling = false, triggered = false;
+  const THRESHOLD = 72;
+
+  function getIndicator() { return document.getElementById('ptrIndicator'); }
+  function getSpinner()   { return document.getElementById('ptrSpinner'); }
+  function getLabel()     { return document.getElementById('ptrLabel'); }
+
+  document.addEventListener('touchstart', e => {
+    if (window.scrollY === 0) {
+      startY = e.touches[0].clientY;
+      pulling = true;
+      triggered = false;
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchmove', e => {
+    if (!pulling) return;
+    const dist = Math.max(0, e.touches[0].clientY - startY);
+    if (dist < 4) return;
+    const ind = getIndicator();
+    const progress = Math.min(dist / THRESHOLD, 1);
+    const h = Math.round(progress * 36);
+    ind.style.height = h + 'px';
+    getSpinner().style.transform = `rotate(${progress * 360}deg)`;
+    if (dist >= THRESHOLD && !triggered) {
+      triggered = true;
+      getLabel().textContent = 'Release to refresh';
+    } else if (dist < THRESHOLD) {
+      triggered = false;
+      getLabel().textContent = 'Pull to refresh';
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchend', () => {
+    if (!pulling) return;
+    pulling = false;
+    const ind = getIndicator();
+    if (triggered) {
+      // Animate spinner while refreshing
+      getLabel().textContent = 'Refreshing…';
+      getSpinner().style.animation = 'spin 0.7s linear infinite';
+      loadLocation(STATE.lat, STATE.lon, STATE.locationName, STATE.isGPS)
+        .finally(() => {
+          ind.style.height = '0px';
+          getSpinner().style.animation = '';
+        });
+    } else {
+      ind.style.height = '0px';
+    }
+    triggered = false;
+  });
+})();
 
 // ── Hero ───────────────────────────────────────────────────────────────────
 function renderHero() {
@@ -848,7 +941,7 @@ function renderHourly() {
     cards.push(`
       <div class="hr-card ${isNow ? 'now' : ''}">
         <span class="hr-time">${label}</span>
-        <span class="hr-icon">${wmoIcon(h.weathercode[i])}</span>
+        <span class="hr-icon">${wmoIcon(h.weathercode[i], h.is_day?.[i] !== 0)}</span>
         <span class="hr-temp">${Math.round(h.temperature_2m[i])}°</span>
         <span class="hr-rain">${Math.round(h.precipitation_probability[i] ?? 0)}%</span>
       </div>`);
@@ -935,7 +1028,7 @@ function buildDaySlots(h, dateStr) {
     }
     return {
       label: def.label,
-      icon: wmoIcon(h.weathercode[idx]),
+      icon: wmoIcon(h.weathercode[idx], h.is_day?.[idx] !== 0),
       temp: Math.round(h.temperature_2m[idx]),
       rain: Math.round(h.precipitation_probability[idx] ?? 0),
     };
@@ -952,32 +1045,45 @@ function setPrecip(mode, el) {
 
 function renderPrecip(mode) {
   const d = STATE.weather.daily;
-  // Past 7 days: indices 0-6 (past_days=7), today is 7
   const labels = [];
   const vals = [];
+
   for (let i = 0; i <= 7; i++) {
     const dt = new Date(d.time[i] + 'T12:00:00');
     labels.push(dt.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }));
     if (mode === 'rain') {
-      vals.push(+(d.precipitation_sum[i] ?? 0).toFixed(1));
+      // precipitation_sum is total liquid equivalent (rain + snow-as-liquid).
+      // Subtract snow liquid equivalent (snowfall_sum cm ÷ 10 to get mm) to get rain-only.
+      const totalMm  = +(d.precipitation_sum[i]  ?? 0);
+      const snowMm   = +((d.snowfall_sum[i] ?? 0) / 10).toFixed(1); // cm → mm liquid equiv
+      vals.push(+Math.max(totalMm - snowMm, 0).toFixed(1));
     } else {
-      vals.push(+(d.snowfall_sum[i] ?? 0).toFixed(1));
+      vals.push(+(d.snowfall_sum[i] ?? 0).toFixed(1)); // already in cm
     }
   }
 
+  const unit = mode === 'rain' ? 'mm' : 'cm';
   const maxVal = Math.max(...vals, 1);
   const chartEl = document.getElementById('precipChart');
-  chartEl.innerHTML = vals.map((v, i) => {
-    const h = Math.round((v / maxVal) * 64);
-    const isToday = i === 7;
-    return `<div class="pb-wrap">
-      <div class="pb ${mode}" style="height:${Math.max(h, 2)}px;${isToday ? 'opacity:1;' : ''}"></div>
-      <span class="pb-lbl">${labels[i].split(' ')[1]}</span>
+
+  // Chart with unit label on y-axis
+  chartEl.innerHTML = `
+    <div style="display:flex;flex-direction:column;justify-content:space-between;align-items:flex-end;padding-bottom:16px;margin-right:4px;">
+      <span style="font-size:9px;color:var(--text3)">${maxVal} ${unit}</span>
+      <span style="font-size:9px;color:var(--text3)">0</span>
+    </div>
+    <div style="flex:1;display:flex;align-items:flex-end;gap:4px;">
+      ${vals.map((v, i) => {
+        const h = Math.round((v / maxVal) * 64);
+        const isToday = i === 7;
+        return `<div class="pb-wrap">
+          <div class="pb ${mode}" style="height:${Math.max(h, 2)}px;${isToday ? 'opacity:1;' : ''}"></div>
+          <span class="pb-lbl">${labels[i].split(' ')[1]}</span>
+        </div>`;
+      }).join('')}
     </div>`;
-  }).join('');
 
   const total = vals.slice(0, 7).reduce((a, b) => a + b, 0).toFixed(1);
-  const unit = mode === 'rain' ? 'mm' : 'cm';
   const avg = mode === 'rain' ? 22 : 5;
   const diff = (total - avg).toFixed(1);
   const diffColor = diff > 0 ? 'var(--blue)' : 'var(--success)';
@@ -994,13 +1100,41 @@ function renderPrecip(mode) {
       : total < 5
       ? 'Dry week. Consider watering established plants and delaying direct sowing until rain returns.'
       : 'Normal rainfall. Good conditions for germination and garden establishment.',
-    snow: total > 20
-      ? 'Good recent snowfall at valley level — mountain snowpack will be excellent. Check local resort sites for current base depth.'
-      : total > 5
-      ? 'Light snowfall at valley level. Check Whistler or local mountain reports for current snowpack at elevation.'
-      : 'No significant snowfall at valley level. Ski conditions depend on elevation — check mountain resort reports.',
+    snow: snowNote(parseFloat(total)),
   };
   document.getElementById('precipNote').textContent = notes[mode];
+}
+
+function snowNote(totalCm) {
+  const elev = STATE.weather?.elevation ?? 0;
+  const lat = STATE.lat ?? 50;
+  const name = STATE.locationName || 'This location';
+
+  // High elevation — they're in the mountains themselves
+  if (elev > 800) {
+    if (totalCm > 20) return `Excellent snowfall at ${name}. Great conditions — check local grooming reports before heading out.`;
+    if (totalCm > 5)  return `Moderate snowfall at ${name}. Conditions should be decent; check local resort or trail reports.`;
+    return `Light snow at ${name} recently. Pack conditions may be variable — check local reports before going out.`;
+  }
+
+  // Mid elevation — foothills, benchlands, elevated valleys
+  if (elev > 300) {
+    if (totalCm > 20) return `Heavy snowfall in the area. Roads may be affected — check conditions before driving to higher terrain.`;
+    if (totalCm > 5)  return `Some snowfall in the area. Higher terrain nearby will have better accumulation — check local resort or backcountry reports.`;
+    return `Minimal snow at ${name}'s elevation. Check nearby mountain reports for snowpack at higher terrain.`;
+  }
+
+  // Low elevation, high latitude (prairie, boreal, northern) — no nearby mountains
+  if (lat > 52 && elev < 200) {
+    if (totalCm > 20) return `Significant snowfall at ${name}. Good base for cross-country skiing and snowshoeing locally.`;
+    if (totalCm > 5)  return `Light to moderate snowfall at ${name}. Suitable for cross-country and groomed trail activities.`;
+    return `Little recent snow at ${name}. Groomed trail conditions may be marginal — check local parks or club reports.`;
+  }
+
+  // Low elevation, mid latitude (coastal lowlands, river valleys near mountains)
+  if (totalCm > 20) return `Heavy snow at valley level — mountain snowpack will be deep. Check road conditions and resort reports before heading up.`;
+  if (totalCm > 5)  return `Some snowfall at valley level. Mountain snowpack at elevation will be better — check local resort reports for base depth.`;
+  return `Minimal snow at valley level. Ski conditions depend on elevation — check nearby mountain resort reports for current snowpack.`;
 }
 
 // ── Details ────────────────────────────────────────────────────────────────
@@ -1062,6 +1196,13 @@ function updateSunArc(sunrise, sunset) {
 function renderAurora() {
   const kp = STATE.kp ?? 2.0;
   const lat = STATE.lat ?? 49;
+
+  // Geo meta — coordinates + elevation
+  const elev = STATE.weather?.elevation;
+  const latStr = Math.abs(lat).toFixed(2) + '°' + (lat >= 0 ? 'N' : 'S');
+  const lonStr = Math.abs(STATE.lon ?? 0).toFixed(2) + '°' + ((STATE.lon ?? 0) >= 0 ? 'E' : 'W');
+  const elevStr = elev != null ? ` · ${Math.round(elev)} m` : '';
+  document.getElementById('geoMeta').textContent = `${latStr}  ${lonStr}${elevStr}`;
   document.getElementById('kpNum').textContent = kp.toFixed(1);
   document.getElementById('kpFill').style.width = `${(kp / 9) * 100}%`;
 
@@ -1271,12 +1412,13 @@ function formatHour(date, withAmPm = false) {
   return `${h12} ${ampm}`;
 }
 
-function wmoIcon(code) {
-  if (code === 0) return '☀️';
-  if (code <= 2) return '🌤';
+function wmoIcon(code, isDay = true) {
+  if (code === 0) return isDay ? '☀️' : '🌙';
+  if (code === 1) return isDay ? '🌤' : '🌙';
+  if (code === 2) return isDay ? '⛅' : '☁️';
   if (code === 3) return '☁️';
   if (code <= 49) return '🌫';
-  if (code <= 57) return '🌧';
+  if (code <= 57) return '🌦';
   if (code <= 67) return '🌧';
   if (code <= 77) return '❄️';
   if (code <= 82) return '🌧';
