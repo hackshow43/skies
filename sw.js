@@ -1,5 +1,5 @@
-const CACHE = 'skies-v1';
-const STATIC = ['/', '/index.html', '/manifest.json'];
+const CACHE = 'skies-v2';
+const STATIC = ['/skies/', '/skies/index.html', '/skies/manifest.json'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
