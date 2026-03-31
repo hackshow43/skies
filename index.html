@@ -296,28 +296,52 @@
 
     /* ── 7-day ──────────────────────────────────────────── */
     .week { display: flex; flex-direction: column; gap: 1px; margin-bottom: 24px; }
+    .day-item { border-radius: var(--radius-sm); overflow: hidden; }
     .day-row {
       display: flex; align-items: center; padding: 9px 10px;
-      border-radius: var(--radius-sm); gap: 6px;
+      gap: 6px; cursor: pointer;
       transition: background 0.1s;
+      -webkit-tap-highlight-color: transparent;
     }
     .day-row:hover { background: var(--bg2); }
+    .day-item.open .day-row { background: var(--bg2); }
     .day-name { font-size: 13px; color: var(--text); width: 76px; flex-shrink: 0; }
     .day-name.today { font-weight: 500; }
     .day-icon { font-size: 16px; width: 26px; text-align: center; flex-shrink: 0; }
-    .rain-wrap { flex: 1; display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .rain-wrap { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .rain-top { display: flex; align-items: center; gap: 7px; }
     .rain-pct { font-size: 12px; color: var(--blue); width: 30px; flex-shrink: 0; }
     .rain-track {
       flex: 1; height: 3px; background: var(--border2);
       border-radius: 99px; overflow: hidden;
     }
     .rain-bar { height: 100%; background: var(--blue); border-radius: 99px; opacity: 0.45; }
-    .day-mm { font-size: 10px; color: var(--blue); flex-shrink: 0; white-space: nowrap; }
+    .day-mm { font-size: 10px; color: var(--blue); padding-left: 37px; }
     .day-range {
       font-size: 12px; color: var(--text); flex-shrink: 0;
       display: flex; gap: 4px; width: 54px; justify-content: flex-end;
     }
     .day-lo { color: var(--text3); }
+    .day-chevron { font-size: 9px; color: var(--text3); flex-shrink: 0; transition: transform 0.2s; }
+    .day-item.open .day-chevron { transform: rotate(180deg); }
+
+    /* ── Day expand panel ───────────────────────────────── */
+    .day-expand {
+      max-height: 0; overflow: hidden;
+      transition: max-height 0.28s ease;
+      background: var(--bg2);
+    }
+    .day-item.open .day-expand { max-height: 160px; }
+    .day-slots {
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      gap: 0; padding: 10px 10px 12px;
+      border-top: 0.5px solid var(--border);
+    }
+    .day-slot { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+    .slot-label { font-size: 10px; color: var(--text3); }
+    .slot-icon { font-size: 18px; }
+    .slot-temp { font-size: 13px; font-weight: 500; color: var(--text); }
+    .slot-rain { font-size: 10px; color: var(--blue); }
 
     /* ── Recent precipitation ───────────────────────────── */
     .precip-card {
@@ -835,6 +859,7 @@ function renderHourly() {
 // ── 7-day ──────────────────────────────────────────────────────────────────
 function renderWeek() {
   const d = STATE.weather.daily;
+  const h = STATE.weather.hourly;
   const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   const rows = [];
 
@@ -846,24 +871,75 @@ function renderWeek() {
     const hi = Math.round(d.temperature_2m_max[i]);
     const lo = Math.round(d.temperature_2m_min[i]);
     const mm = +(d.precipitation_sum[i] ?? 0).toFixed(1);
-    // Show mm amount only if meaningful (>0.2mm)
-    const mmLabel = mm >= 0.2 ? `<span class="day-mm">${mm} mm</span>` : '';
+    const mmLabel = mm >= 0.2 ? `<div class="day-mm">${mm} mm expected</div>` : '';
+
+    // Build 4 time-of-day slots from hourly data for this date
+    const dateStr = d.time[i];
+    const slots = buildDaySlots(h, dateStr);
+    const slotsHtml = slots.map(s => `
+      <div class="day-slot">
+        <span class="slot-label">${s.label}</span>
+        <span class="slot-icon">${s.icon}</span>
+        <span class="slot-temp">${s.temp}°</span>
+        <span class="slot-rain">${s.rain}%</span>
+      </div>`).join('');
+
     rows.push(`
-      <div class="day-row">
-        <span class="day-name ${isToday ? 'today' : ''}">${name}</span>
-        <span class="day-icon">${wmoIcon(d.weathercode[i])}</span>
-        <div class="rain-wrap">
-          <span class="rain-pct">${rain}%</span>
-          <div class="rain-track"><div class="rain-bar" style="width:${rain}%"></div></div>
-          ${mmLabel}
+      <div class="day-item" id="dayitem-${i}">
+        <div class="day-row" onclick="toggleDay('dayitem-${i}')">
+          <span class="day-name ${isToday ? 'today' : ''}">${name}</span>
+          <span class="day-icon">${wmoIcon(d.weathercode[i])}</span>
+          <div class="rain-wrap">
+            <div class="rain-top">
+              <span class="rain-pct">${rain}%</span>
+              <div class="rain-track"><div class="rain-bar" style="width:${rain}%"></div></div>
+            </div>
+            ${mmLabel}
+          </div>
+          <div class="day-range">
+            <span class="day-lo">${lo}°</span>
+            <span>${hi}°</span>
+          </div>
+          <span class="day-chevron">▼</span>
         </div>
-        <div class="day-range">
-          <span class="day-lo">${lo}°</span>
-          <span>${hi}°</span>
+        <div class="day-expand">
+          <div class="day-slots">${slotsHtml}</div>
         </div>
       </div>`);
   }
   document.getElementById('weekRow').innerHTML = rows.join('');
+}
+
+function toggleDay(id) {
+  const el = document.getElementById(id);
+  const isOpen = el.classList.contains('open');
+  // Close any other open ones
+  document.querySelectorAll('.day-item.open').forEach(d => d.classList.remove('open'));
+  if (!isOpen) el.classList.add('open');
+}
+
+// Build Morning / Midday / Evening / Night slots from hourly array for a given date string
+function buildDaySlots(h, dateStr) {
+  // Target hours for each slot: Morning=7, Midday=12, Evening=17, Night=21
+  const slotDefs = [
+    { label: 'Morning', hour: 7 },
+    { label: 'Midday',  hour: 12 },
+    { label: 'Evening', hour: 17 },
+    { label: 'Night',   hour: 21 },
+  ];
+  return slotDefs.map(def => {
+    const target = `${dateStr}T${String(def.hour).padStart(2,'0')}:00`;
+    const idx = h.time.indexOf(target);
+    if (idx < 0 || idx >= h.temperature_2m.length) {
+      return { label: def.label, icon: '—', temp: '—', rain: '—' };
+    }
+    return {
+      label: def.label,
+      icon: wmoIcon(h.weathercode[idx]),
+      temp: Math.round(h.temperature_2m[idx]),
+      rain: Math.round(h.precipitation_probability[idx] ?? 0),
+    };
+  });
 }
 
 // ── Precipitation ──────────────────────────────────────────────────────────
