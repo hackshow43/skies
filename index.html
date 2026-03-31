@@ -10,6 +10,7 @@
   <meta name="apple-mobile-web-app-title" content="Skies" />
   <title>Skies</title>
   <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
   <style>
     /* ── Reset & tokens ─────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -311,6 +312,7 @@
       border-radius: 99px; overflow: hidden;
     }
     .rain-bar { height: 100%; background: var(--blue); border-radius: 99px; opacity: 0.45; }
+    .day-mm { font-size: 10px; color: var(--blue); flex-shrink: 0; white-space: nowrap; }
     .day-range {
       font-size: 12px; color: var(--text); flex-shrink: 0;
       display: flex; gap: 4px; width: 54px; justify-content: flex-end;
@@ -651,7 +653,7 @@ async function loadLocation(lat, lon, name, isGPS) {
   hideError();
 
   try {
-    await Promise.all([fetchWeather(lat, lon), fetchKp()]);
+    await Promise.all([fetchWeather(lat, lon), fetchKp(), fetchPollen(lat, lon)]);
     renderAll();
     showApp();
   } catch (e) {
@@ -698,7 +700,50 @@ async function fetchKp() {
   }
 }
 
-// ── Render all ─────────────────────────────────────────────────────────────
+// ── Pollen API (Open-Meteo Air Quality) ───────────────────────────────────
+async function fetchPollen(lat, lon) {
+  try {
+    const url = `https://air-quality-api.open-meteo.com/v1/air-quality?` +
+      `latitude=${lat}&longitude=${lon}` +
+      `&hourly=birch_pollen,grass_pollen,ragweed_pollen` +
+      `&timezone=auto&forecast_days=1`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('Pollen fetch failed');
+    const data = await r.json();
+    // Average today's non-null hourly values for each type
+    const avg = (arr) => {
+      if (!arr) return null;
+      const valid = arr.filter(v => v !== null && v >= 0);
+      return valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : null;
+    };
+    STATE.pollen = {
+      birch:   avg(data.hourly?.birch_pollen),
+      grass:   avg(data.hourly?.grass_pollen),
+      ragweed: avg(data.hourly?.ragweed_pollen),
+    };
+  } catch {
+    STATE.pollen = null;
+  }
+}
+
+// Classify pollen grains/m³ into level string
+function pollenLevel(val) {
+  if (val === null || val === undefined) return 'low';
+  if (val < 10)  return 'low';
+  if (val < 50)  return 'mod';
+  if (val < 200) return 'high';
+  return 'vhigh';
+}
+function pollenText(val) {
+  const l = pollenLevel(val);
+  return { low: 'Low', mod: 'Moderate', high: 'High', vhigh: 'Very High' }[l];
+}
+function pollenClass(val) {
+  const l = pollenLevel(val);
+  return { low: 'p-low', mod: 'p-mod', high: 'p-high', vhigh: 'p-high' }[l];
+}
+
+
 function renderAll() {
   renderHeader();
   renderHero();
@@ -737,10 +782,17 @@ function renderPills() {
   const uv = d.uv_index_max[todayIdx] ?? 0;
   const uvLabel = uv <= 2 ? 'Low' : uv <= 5 ? 'Moderate' : uv <= 7 ? 'High' : uv <= 10 ? 'Very High' : 'Extreme';
 
+  const p = STATE.pollen;
+  const topPollen = p ? (
+    p.birch > p.grass && p.birch > p.ragweed ? pollenText(p.birch) :
+    p.grass > p.ragweed ? pollenText(p.grass) :
+    pollenText(p.ragweed)
+  ) : 'Low';
+
   document.getElementById('pillsRow').innerHTML = `
     <div class="pill"><span class="pill-label">Rain</span> ${Math.round(rainPct)}%</div>
     <div class="pill"><span class="pill-label">UV</span> ${uvLabel} · ${Math.round(uv)}</div>
-    <div class="pill"><span class="pill-label">Pollen</span> Moderate</div>
+    <div class="pill"><span class="pill-label">Pollen</span> ${topPollen}</div>
   `;
 }
 
@@ -784,7 +836,6 @@ function renderHourly() {
 function renderWeek() {
   const d = STATE.weather.daily;
   const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  const today = new Date();
   const rows = [];
 
   for (let i = 7; i < Math.min(d.time.length, 14); i++) {
@@ -794,6 +845,9 @@ function renderWeek() {
     const rain = Math.round(d.precipitation_probability_max[i] ?? 0);
     const hi = Math.round(d.temperature_2m_max[i]);
     const lo = Math.round(d.temperature_2m_min[i]);
+    const mm = +(d.precipitation_sum[i] ?? 0).toFixed(1);
+    // Show mm amount only if meaningful (>0.2mm)
+    const mmLabel = mm >= 0.2 ? `<span class="day-mm">${mm} mm</span>` : '';
     rows.push(`
       <div class="day-row">
         <span class="day-name ${isToday ? 'today' : ''}">${name}</span>
@@ -801,6 +855,7 @@ function renderWeek() {
         <div class="rain-wrap">
           <span class="rain-pct">${rain}%</span>
           <div class="rain-track"><div class="rain-bar" style="width:${rain}%"></div></div>
+          ${mmLabel}
         </div>
         <div class="day-range">
           <span class="day-lo">${lo}°</span>
@@ -896,19 +951,18 @@ function renderDetails() {
     updateSunArc(sr, ss);
   }
 
-  // Pollen (static contextual — real pollen requires separate API)
-  const month = new Date().getMonth();
-  const treeLevel = (month >= 2 && month <= 4) ? 'mod' : 'low';
-  const grassLevel = (month >= 4 && month <= 7) ? 'mod' : 'low';
-  const weedLevel = (month >= 7 && month <= 9) ? 'mod' : 'low';
-  const levelText = { low: 'Low', mod: 'Moderate', high: 'High' };
-  document.getElementById('pollenRow').innerHTML = ['Tree','Grass','Weed'].map((t, i) => {
-    const lvl = [treeLevel, grassLevel, weedLevel][i];
-    return `<div>
-      <div class="pollen-item-lbl">${t}</div>
-      <div class="pollen-item-val p-${lvl}">${levelText[lvl]}</div>
-    </div>`;
-  }).join('');
+  // Pollen — live from Open-Meteo Air Quality API
+  const p = STATE.pollen;
+  const pollenItems = [
+    { label: 'Birch',   val: p?.birch   ?? null },
+    { label: 'Grass',   val: p?.grass   ?? null },
+    { label: 'Ragweed', val: p?.ragweed ?? null },
+  ];
+  document.getElementById('pollenRow').innerHTML = pollenItems.map(item => `
+    <div>
+      <div class="pollen-item-lbl">${item.label}</div>
+      <div class="pollen-item-val ${pollenClass(item.val)}">${pollenText(item.val)}</div>
+    </div>`).join('');
 }
 
 function updateSunArc(sunrise, sunset) {
