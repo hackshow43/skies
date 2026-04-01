@@ -710,22 +710,82 @@ async function loadLocation(lat, lon, name, isGPS) {
   }
 }
 
-// ── Weather API (Open-Meteo) ───────────────────────────────────────────────
+// ── Weather API — multi-model ensemble ────────────────────────────────────
+// Fetches GFS (US), ECMWF (European), and GDPS (Canadian) in parallel,
+// averages numeric fields element-wise, keeps metadata from ECMWF.
 async function fetchWeather(lat, lon) {
-  const url = `https://api.open-meteo.com/v1/forecast?` +
-    `latitude=${lat}&longitude=${lon}` +
+  const BASE = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
     `&current=temperature_2m,apparent_temperature,weathercode,precipitation` +
     `&hourly=temperature_2m,weathercode,precipitation_probability,precipitation,is_day` +
     `&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,precipitation_probability_max,sunrise,sunset,uv_index_max` +
-    `&past_days=7` +
-    `&forecast_days=7` +
-    `&temperature_unit=celsius` +
-    `&wind_speed_unit=kmh` +
-    `&timezone=auto`;
+    `&past_days=7&forecast_days=7&temperature_unit=celsius&wind_speed_unit=kmh&timezone=auto`;
 
-  const r = await fetch(url);
-  if (!r.ok) throw new Error('Weather fetch failed');
-  STATE.weather = await r.json();
+  const MODELS = [
+    '',                          // default (ECMWF-based Best Match)
+    '&models=gfs_seamless',      // GFS — NOAA American model
+    '&models=gem_seamless',      // GEM — Canadian GDPS model
+  ];
+
+  // Fetch all three; allow partial failure — ensemble with 2 is still better than 1
+  const results = await Promise.allSettled(
+    MODELS.map(m => fetch(BASE + m).then(r => r.ok ? r.json() : null))
+  );
+
+  const datasets = results
+    .filter(r => r.status === 'fulfilled' && r.value)
+    .map(r => r.value);
+
+  if (!datasets.length) throw new Error('All weather fetches failed');
+
+  // Use ECMWF (first) as the structural template — timezone, time arrays, metadata
+  const primary = datasets[0];
+
+  // Merge: average numeric arrays across all datasets that have the field
+  function avgArrays(key, parent = 'hourly') {
+    const arrays = datasets
+      .map(d => d[parent]?.[key])
+      .filter(a => Array.isArray(a));
+    if (!arrays.length) return primary[parent]?.[key];
+    return arrays[0].map((_, i) => {
+      const vals = arrays.map(a => a[i]).filter(v => v !== null && v !== undefined && !isNaN(v));
+      return vals.length ? +(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2) : null;
+    });
+  }
+
+  // Non-numeric fields we never average — take from primary
+  const SKIP_HOURLY = new Set(['time', 'weathercode', 'is_day']);
+  const SKIP_DAILY  = new Set(['time', 'weathercode', 'sunrise', 'sunset']);
+  const SKIP_CURRENT = new Set(['weathercode']);
+
+  // Build merged hourly
+  const mergedHourly = { ...primary.hourly };
+  for (const key of Object.keys(primary.hourly)) {
+    if (!SKIP_HOURLY.has(key)) mergedHourly[key] = avgArrays(key, 'hourly');
+  }
+
+  // Build merged daily
+  const mergedDaily = { ...primary.daily };
+  for (const key of Object.keys(primary.daily)) {
+    if (!SKIP_DAILY.has(key)) mergedDaily[key] = avgArrays(key, 'daily');
+  }
+
+  // Build merged current (scalar average)
+  const mergedCurrent = { ...primary.current };
+  for (const key of Object.keys(primary.current)) {
+    if (key === 'time' || SKIP_CURRENT.has(key)) continue;
+    const vals = datasets
+      .map(d => d.current?.[key])
+      .filter(v => v !== null && v !== undefined && !isNaN(v));
+    if (vals.length) mergedCurrent[key] = +(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2);
+  }
+
+  STATE.weather = {
+    ...primary,
+    current: mergedCurrent,
+    hourly:  mergedHourly,
+    daily:   mergedDaily,
+    _modelCount: datasets.length,
+  };
 }
 
 // ── Kp / Aurora (NOAA SWPC) ───────────────────────────────────────────────
@@ -812,7 +872,9 @@ function renderHeader() {
   const now = new Date();
   const dateStr = now.toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric', timeZone: tz });
   const updatedStr = now.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit', timeZone: tz });
-  document.getElementById('dateLabel').textContent = `${dateStr} · Updated ${updatedStr}`;
+  const modelCount = STATE.weather?._modelCount ?? 1;
+  const modelNote = modelCount >= 3 ? '3-model avg' : modelCount === 2 ? '2-model avg' : '1 model';
+  document.getElementById('dateLabel').textContent = `${dateStr} · ${modelNote} · ${updatedStr}`;
 }
 
 // ── Live clock (location-local time) ───────────────────────────────────────
